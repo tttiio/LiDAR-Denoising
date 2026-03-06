@@ -202,12 +202,14 @@ class SemanticSTFLoader(Dataset):
         
         # PolarQuantize 的 range_y 参数是【径向距离范围】，不是Y轴范围
         # 径向距离 = sqrt(x² + y²)，范围应该是正数
+        # PolarQuantize 需要 3 维 size (H, W, D)，但我们只用前两维用于 Range View
+        rv_size = (self.Voxel.rv_shape[0], self.Voxel.rv_shape[1], 30)  # (H, W, D)
         sphere_coord = utils.PolarQuantize(
             pcd,
             phi_range=(-180.0, 180.0),  # 方位角范围
             range_y=(0.0, 70.0),        # 径向距离范围 (0到约100m，设70m覆盖大部分点)
             range_z=self.Voxel.range_z,  # 高度范围
-            size=self.Voxel.rv_shape     # 使用 rv_shape 而不是 bev_shape
+            size=rv_size                 # 3 维 size
         )
         
         return coord, sphere_coord

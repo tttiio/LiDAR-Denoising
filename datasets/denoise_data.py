@@ -226,24 +226,26 @@ class DenoiseDataLoader(Dataset):
             size=self.Voxel.bev_shape
         )
         
+        # PolarQuantize 需要正确的参数
+        rv_size = (self.Voxel.rv_shape[0], self.Voxel.rv_shape[1], 30)  # (H, W, D) 3维
         sphere_coord = utils.PolarQuantize(
             pcds_noisy,
-            range_x=self.Voxel.range_x,
-            range_y=self.Voxel.range_y,
+            phi_range=(-180.0, 180.0),
+            range_y=(0.0, 70.0),  # 径向距离范围
             range_z=self.Voxel.range_z,
-            size=self.Voxel.bev_shape
+            size=rv_size
         )
         
-        # 转为tensor
+        # 转为tensor - 只取前两维
         xyz = torch.FloatTensor(xyz.astype(np.float32)).transpose(0, 1).unsqueeze(-1)  # (3, N, 1)
         intensity = torch.FloatTensor(intensity.astype(np.float32)).unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
-        coord = torch.FloatTensor(coord.astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
-        sphere_coord = torch.FloatTensor(sphere_coord.astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
+        coord_tensor = torch.FloatTensor(coord[:, :2].astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
+        sphere_coord_tensor = torch.FloatTensor(sphere_coord[:, :2].astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
         
         if noise_mask is not None:
             noise_mask = torch.BoolTensor(noise_mask).unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
         
-        return xyz, intensity, coord, sphere_coord, noise_mask
+        return xyz, intensity, coord_tensor, sphere_coord_tensor, noise_mask
     
     def __getitem__(self, index):
         fname_pcds, fname_labels, seq_id = self.flist[index]

@@ -295,7 +295,7 @@ def main():
     
     # 加载测试数据
     print('Loading test data...')
-    test_dataset = DataloadTest(pDataset.Val)
+    test_dataset = DataloadTest(pDataset.Test)
     test_loader = torch.utils.data.DataLoader(
         test_dataset,
         batch_size=1,

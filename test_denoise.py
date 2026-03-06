@@ -30,6 +30,7 @@ def test_data_loader():
             range_y = (-50.0, 50.0)
             range_z = (-5.0, 3.0)
             bev_shape = (600, 600, 30)
+            rv_shape = (64, 2048)  # Range View 网格大小
     
     try:
         dataset = DataloadTrain(MockConfig)

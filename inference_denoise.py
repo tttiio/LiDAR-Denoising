@@ -49,19 +49,21 @@ def preprocess_point_cloud(pcds, Voxel):
         size=Voxel.bev_shape
     )
     
+    # PolarQuantize 需要正确的参数
+    rv_size = (Voxel.rv_shape[0], Voxel.rv_shape[1], 30)  # (H, W, D) 3维
     sphere_coord = utils.PolarQuantize(
         pcds_4d,
-        range_x=Voxel.range_x,
-        range_y=Voxel.range_y,
+        phi_range=(-180.0, 180.0),
+        range_y=(0.0, 70.0),  # 径向距离范围
         range_z=Voxel.range_z,
-        size=Voxel.bev_shape
+        size=rv_size
     )
     
-    # 转为tensor
-    xyz_tensor = torch.FloatTensor(xyz.astype(np.float32)).transpose(0, 1).unsqueeze(0).unsqueeze(-1)
-    intensity_tensor = torch.FloatTensor(intensity.astype(np.float32)).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-    coord_tensor = torch.FloatTensor(coord.astype(np.float32)).unsqueeze(0).unsqueeze(-1)
-    sphere_coord_tensor = torch.FloatTensor(sphere_coord.astype(np.float32)).unsqueeze(0).unsqueeze(-1)
+    # 转为tensor - 注意维度
+    xyz_tensor = torch.FloatTensor(xyz.astype(np.float32)).transpose(0, 1).unsqueeze(0).unsqueeze(-1)  # (1, 3, N, 1)
+    intensity_tensor = torch.FloatTensor(intensity.astype(np.float32)).unsqueeze(0).unsqueeze(0).unsqueeze(-1)  # (1, 1, N, 1)
+    coord_tensor = torch.FloatTensor(coord[:, :2].astype(np.float32)).unsqueeze(0).unsqueeze(-1)  # (1, N, 2, 1)
+    sphere_coord_tensor = torch.FloatTensor(sphere_coord[:, :2].astype(np.float32)).unsqueeze(0).unsqueeze(-1)  # (1, N, 2, 1)
     
     return xyz_tensor, intensity_tensor, coord_tensor, sphere_coord_tensor
 

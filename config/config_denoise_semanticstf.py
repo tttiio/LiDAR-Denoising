@@ -24,7 +24,7 @@ def get_config():
             range_z = (-5.0, 3.0)
 
             bev_shape = (600, 600, 30)
-            rv_shape = (64, 2048)
+            rv_shape = (64, 2048)  # Range View 网格大小 (H, W)，用于 VoxelMaxPool
 
     class DatasetParam:
         class Train:
@@ -45,6 +45,13 @@ def get_config():
             data_src = 'semanticstf_data'
             num_workers = 4
             frame_point_num = 60000  # 验证时也采样，避免内存溢出
+            SeqDir = General.SeqDir
+            Voxel = General.Voxel
+
+        class Test:
+            data_src = 'semanticstf_data'
+            num_workers = 4
+            frame_point_num = 60000
             SeqDir = General.SeqDir
             Voxel = General.Voxel
 
@@ -99,14 +106,14 @@ def get_config():
         class optimizer:
             type = "adamw"
             base_lr = 1e-3
-            weight_decay = 1e-4
+            wd = 1e-4  # weight decay (与 builder.py 中的参数名匹配)
             betas = (0.9, 0.999)
 
         class schedule:
-            type = "cosine"
+            type = "OneCycle"  # 使用 OneCycle scheduler (builder.py 支持)
             begin_epoch = 0
             end_epoch = 50
-            warmup_epochs = 5
-            min_lr = 1e-6
+            pct_start = 0.1  # warmup 比例
+            final_lr = 1e-6
 
     return General, DatasetParam, ModelParam, OptimizeParam
