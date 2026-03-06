@@ -60,11 +60,14 @@ class SpatialConsistencyLoss(nn.Module):
     - 正常点云局部几何应该是平滑连续的
     - 通过KNN找到邻域，计算与邻域的偏离程度
     - 偏离大的点可能是噪声
+    
+    优化：为了避免内存溢出，使用采样策略
     """
-    def __init__(self, k=8, sharpness=2.0):
+    def __init__(self, k=8, sharpness=2.0, max_points=8000):
         super(SpatialConsistencyLoss, self).__init__()
         self.k = k
         self.sharpness = sharpness
+        self.max_points = max_points  # 最大计算点数
     
     def forward(self, xyz, spatial_score):
         """
@@ -81,26 +84,38 @@ class SpatialConsistencyLoss(nn.Module):
         total_loss = 0.0
         
         for b in range(BS):
-            # 计算点之间的距离
             xyz_b = xyz[b]  # (N, 3)
-            dist = torch.cdist(xyz_b.unsqueeze(0), xyz_b.unsqueeze(0)).squeeze(0)  # (N, N)
+            score_b = spatial_score[b].squeeze(0)  # (N,)
+            
+            # 如果点数太多，随机采样
+            if N > self.max_points:
+                indices = torch.randperm(N, device=xyz.device)[:self.max_points]
+                xyz_sampled = xyz_b[indices]  # (M, 3)
+                score_sampled = score_b[indices]  # (M,)
+            else:
+                xyz_sampled = xyz_b
+                score_sampled = score_b
+            
+            M = xyz_sampled.shape[0]
+            
+            # 计算采样点之间的距离
+            dist = torch.cdist(xyz_sampled.unsqueeze(0), xyz_sampled.unsqueeze(0)).squeeze(0)  # (M, M)
             
             # 找K近邻
-            _, knn_idx = dist.topk(self.k + 1, largest=False, dim=1)  # (N, k+1), 包含自己
-            knn_idx = knn_idx[:, 1:]  # 去掉自己 (N, k)
+            _, knn_idx = dist.topk(self.k + 1, largest=False, dim=1)  # (M, k+1), 包含自己
+            knn_idx = knn_idx[:, 1:]  # 去掉自己 (M, k)
             
             # 计算到邻域中心的距离
-            knn_xyz = xyz_b[knn_idx]  # (N, k, 3)
-            center_xyz = knn_xyz.mean(dim=1)  # (N, 3)
-            dist_to_center = (xyz_b - center_xyz).norm(dim=1)  # (N,)
+            knn_xyz = xyz_sampled[knn_idx]  # (M, k, 3)
+            center_xyz = knn_xyz.mean(dim=1)  # (M, 3)
+            dist_to_center = (xyz_sampled - center_xyz).norm(dim=1)  # (M,)
             
             # 归一化
             dist_to_center = dist_to_center / (dist_to_center.max() + 1e-6)
             
             # 一致性分数高的点，应该距离邻域中心近
             # 即：spatial_score 高 → dist_to_center 低
-            score_b = spatial_score[b].squeeze(0)  # (N,)
-            consistency_loss = (score_b * dist_to_center).mean()
+            consistency_loss = (score_sampled * dist_to_center).mean()
             
             total_loss = total_loss + consistency_loss
         
@@ -151,11 +166,14 @@ class ContrastiveLoss(nn.Module):
     - 正常点之间特征相似
     - 正常点与潜在异常点特征不同
     - 通过特征空间的对比学习增强判别能力
+    
+    优化：为了避免内存溢出，使用采样策略
     """
-    def __init__(self, temperature=0.1, anomaly_threshold=0.5):
+    def __init__(self, temperature=0.1, anomaly_threshold=0.5, max_points=8000):
         super(ContrastiveLoss, self).__init__()
         self.temperature = temperature
         self.anomaly_threshold = anomaly_threshold
+        self.max_points = max_points
     
     def forward(self, features, anomaly_prob):
         """
@@ -170,46 +188,71 @@ class ContrastiveLoss(nn.Module):
         anomaly_prob = anomaly_prob.squeeze(-1)  # (BS, 1, N)
         
         total_loss = 0.0
+        valid_batches = 0
         
         for b in range(BS):
             feat_b = features[b]  # (N, C)
             prob_b = anomaly_prob[b].squeeze(0)  # (N,)
             
-            # 归一化特征
-            feat_b = F.normalize(feat_b, dim=1)
-            
-            # 计算相似度矩阵
-            sim_matrix = torch.mm(feat_b, feat_b.t()) / self.temperature  # (N, N)
-            
             # 分组：正常点 vs 潜在异常点
             normal_mask = prob_b < self.anomaly_threshold
             anomaly_mask = prob_b >= self.anomaly_threshold
             
-            if normal_mask.sum() < 2 or anomaly_mask.sum() < 1:
+            if normal_mask.sum() < 10 or anomaly_mask.sum() < 5:
                 continue
             
-            # 正常点之间应该相似
+            # 采样以减少内存
             normal_indices = torch.where(normal_mask)[0]
-            if len(normal_indices) > 1:
-                normal_sim = sim_matrix[normal_indices][:, normal_indices]
+            anomaly_indices = torch.where(anomaly_mask)[0]
+            
+            # 采样正常点
+            if len(normal_indices) > self.max_points // 2:
+                normal_indices = normal_indices[torch.randperm(len(normal_indices), device=features.device)[:self.max_points // 2]]
+            
+            # 采样异常点
+            if len(anomaly_indices) > self.max_points // 2:
+                anomaly_indices = anomaly_indices[torch.randperm(len(anomaly_indices), device=features.device)[:self.max_points // 2]]
+            
+            # 合并并创建采样后的特征和mask
+            all_indices = torch.cat([normal_indices, anomaly_indices])
+            feat_sampled = feat_b[all_indices]  # (M, C)
+            is_normal = torch.cat([torch.ones(len(normal_indices), device=features.device),
+                                   torch.zeros(len(anomaly_indices), device=features.device)]).bool()
+            
+            # 归一化特征
+            feat_sampled = F.normalize(feat_sampled, dim=1)
+            
+            # 计算采样点之间的相似度
+            M = feat_sampled.shape[0]
+            if M < 10:
+                continue
+                
+            sim_matrix = torch.mm(feat_sampled, feat_sampled.t()) / self.temperature  # (M, M)
+            
+            # 正常点之间应该相似
+            normal_sim = sim_matrix[is_normal][:, is_normal]
+            if normal_sim.numel() > 1:
                 # 去掉对角线
-                mask = ~torch.eye(len(normal_indices), dtype=bool, device=features.device)
-                normal_sim = normal_sim[mask]
-                positive_loss = -torch.log(torch.exp(normal_sim).mean() + 1e-6).mean()
+                mask = ~torch.eye(normal_sim.shape[0], dtype=bool, device=features.device)
+                if mask.sum() > 0:
+                    normal_sim_off_diag = normal_sim[mask]
+                    positive_loss = -torch.log(torch.exp(normal_sim_off_diag).mean() + 1e-6).mean()
+                else:
+                    positive_loss = torch.tensor(0.0, device=features.device)
             else:
-                positive_loss = 0.0
+                positive_loss = torch.tensor(0.0, device=features.device)
             
             # 正常点与异常点应该不同
-            anomaly_indices = torch.where(anomaly_mask)[0]
-            if len(anomaly_indices) > 0 and len(normal_indices) > 0:
-                cross_sim = sim_matrix[normal_indices][:, anomaly_indices]
+            cross_sim = sim_matrix[is_normal][:, ~is_normal]
+            if cross_sim.numel() > 0:
                 negative_loss = -torch.log(1 - torch.sigmoid(cross_sim) + 1e-6).mean()
             else:
-                negative_loss = 0.0
+                negative_loss = torch.tensor(0.0, device=features.device)
             
             total_loss = total_loss + positive_loss + negative_loss
+            valid_batches += 1
         
-        return total_loss / max(BS, 1)
+        return total_loss / max(valid_batches, 1)
 
 
 class IntensityDistributionLoss(nn.Module):

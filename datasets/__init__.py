@@ -1,6 +1,5 @@
-from . import data
+# 只导入需要的模块，避免导入缺失依赖的模块
 from . import semanticstf_data
-from . import denoise_data
 
 # SemanticSTF 数据加载器
 from .semanticstf_data import (
@@ -13,9 +12,7 @@ from .semanticstf_data import (
 )
 
 __all__ = [
-    'data',
     'semanticstf_data',
-    'denoise_data',
     'SemanticSTFLoader',
     'DataloadTrain',
     'DataloadVal',
