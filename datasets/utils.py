@@ -125,36 +125,45 @@ def Quantize(pcds, range_x=(-40, 62.4), range_y=(-40, 40), range_z=(-3, 5), size
 
 
 
-def PolarQuantize(pcds, phi_range=(-180.0, 180.0), range_x=(-40, 62.4), range_y=(-40, 40), range_z=(-3, 5), size=(512, 512, 20)):
-
-    range_y=(3, 50)
-    size=(512, 512, 30)
+def PolarQuantize(pcds, phi_range=(-180.0, 180.0), range_x=(-40, 62.4), range_y=(3, 50), range_z=(-3, 5), size=(512, 512, 30)):
+    """
+    极坐标量化函数（圆柱坐标系）
     
+    Args:
+        pcds: (N, C) 点云数据，至少包含 x, y, z
+        phi_range: 方位角范围（度）
+        range_y: 距离范围（径向距离）
+        range_z: 高度范围
+        size: 量化网格大小 (H, W, D)
+    
+    Returns:
+        cylinder_coords: (N, 3) 圆柱坐标 (y_quan, phi_quan, z_quan)
+    """
     H = size[0]
     W = size[1]
-
-    size_x = size[0]
-    size_y = size[1]
-    size_z = size[2]
+    D = size[2]
     
     phi_range_radian = (phi_range[0] * np.pi / 180.0, phi_range[1] * np.pi / 180.0)
     dphi = (phi_range_radian[1] - phi_range_radian[0]) / W
     
-    dz = (range_z[1] - range_z[0]) / size_z
+    dz = (range_z[1] - range_z[0]) / D
     
     x, y, z = pcds[:, 0].copy(), pcds[:, 1].copy(), pcds[:, 2].copy()
 
-    size_y = size[1]
-    distance = np.clip(np.sqrt(x ** 2 + y ** 2), a_min=3.0, a_max=50) + 1e-12
-    dy = (range_y[1] - range_y[0]) / size_y
+    # 计算径向距离并裁剪到有效范围
+    distance = np.clip(np.sqrt(x ** 2 + y ** 2), a_min=range_y[0], a_max=range_y[1]) + 1e-12
+    dy = (range_y[1] - range_y[0]) / H
 
+    # 计算方位角
     phi = phi_range_radian[1] - np.arctan2(y, x)
     phi_quan = (phi / dphi)
     
+    # 高度量化
     z_quan = ((z - range_z[0]) / dz)
-    y_quan = 512 - ((distance - range_y[0]) / dy)
     
-    #print(np.min(phi_quan), np.max(phi_quan), np.min(y_quan), np.max(y_quan), np.min(z_quan), np.max(z_quan))
+    # 距离量化（从上往下，即近处对应大值）
+    y_quan = H - ((distance - range_y[0]) / dy)
+    
     cylinder_coords = np.stack((y_quan, phi_quan, z_quan), axis=-1)
     return cylinder_coords
 

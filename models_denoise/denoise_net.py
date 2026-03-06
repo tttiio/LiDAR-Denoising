@@ -34,7 +34,7 @@ class IntensityPredictor(nn.Module):
             nn.Conv2d(feat_dim, hidden_dim, kernel_size=1),
             nn.BatchNorm2d(hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_dim=1),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1),
             nn.BatchNorm2d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, 1, kernel_size=1)  # 输出预测强度

@@ -111,12 +111,13 @@ python test_denoise.py
 ### 2. 训练
 
 ```bash
-# 单 GPU
-python train_denoise.py --config config/config_denoise_semanticstf.py
+# 单 GPU（默认模式）
+python train_denoise.py --config config/config_denoise_semanticstf
 
-# 多 GPU (4卡)
-torchrun --master_port=12098 --nproc_per_node=4 train_denoise.py \
-    --config config/config_denoise_semanticstf.py
+# 多 GPU 分布式训练（4卡）
+torchrun --nproc_per_node=4 train_denoise.py \
+    --config config/config_denoise_semanticstf \
+    --distributed
 ```
 
 ### 3. 评估

@@ -1,5 +1,9 @@
 """
 自监督点云去噪网络训练脚本
+
+支持两种模式：
+1. 单 GPU 训练：python train_denoise.py --config config/config_denoise_semanticstf
+2. 分布式训练：torchrun --nproc_per_node=N train_denoise.py --config config/config_denoise_semanticstf --distributed
 """
 
 import os
@@ -30,6 +34,7 @@ def get_dataloader(data_src):
     else:
         from datasets.denoise_data import DataloadTrain, DataloadVal
         return DataloadTrain, DataloadVal, None
+
 from utils.logger import config_logger
 from utils import builder
 
@@ -38,8 +43,10 @@ cudnn.deterministic = True
 cudnn.benchmark = False
 
 
-def reduce_tensor(inp):
+def reduce_tensor(inp, distributed=True):
     """Reduce tensor across all processes"""
+    if not distributed:
+        return inp
     world_size = torch.distributed.get_world_size()
     if world_size < 2:
         return inp
@@ -50,10 +57,9 @@ def reduce_tensor(inp):
 
 
 def train_epoch(epoch, end_epoch, model, train_loader, optimizer, scheduler, 
-                criterion, logger, log_frequency, device, fp16=True):
+                criterion, logger, log_frequency, device, fp16=True, distributed=True, rank=0):
     """训练一个epoch"""
     model.train()
-    rank = torch.distributed.get_rank()
     
     if fp16:
         scaler = torch.cuda.amp.GradScaler()
@@ -102,10 +108,9 @@ def train_epoch(epoch, end_epoch, model, train_loader, optimizer, scheduler,
     return loss_dict
 
 
-def validate(model, val_loader, criterion, device, logger):
+def validate(model, val_loader, criterion, device, logger, rank=0):
     """验证"""
     model.eval()
-    rank = torch.distributed.get_rank()
     
     total_losses = {}
     num_batches = 0
@@ -171,34 +176,63 @@ def main(args, config):
     config_logger(os.path.join(save_path, "log.txt"))
     logger = logging.getLogger()
     
-    # 分布式设置
-    local_rank = int(os.getenv("LOCAL_RANK", "0"))
-    device = torch.device(f'cuda:{local_rank}')
-    torch.cuda.set_device(local_rank)
-    torch.distributed.init_process_group(backend='nccl', init_method='env://')
-    world_size = torch.distributed.get_world_size()
-    rank = torch.distributed.get_rank()
+    # ========== 分布式 vs 单 GPU 设置 ==========
+    distributed = args.distributed
+    
+    if distributed:
+        # 分布式训练
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        device = torch.device(f'cuda:{local_rank}')
+        torch.cuda.set_device(local_rank)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+    else:
+        # 单 GPU 训练
+        if torch.cuda.is_available():
+            device = torch.device('cuda:0')
+            torch.cuda.set_device(0)
+        else:
+            device = torch.device('cpu')
+            print("Warning: CUDA not available, using CPU")
+        world_size = 1
+        rank = 0
+        local_rank = 0
+    
+    print(f"Distributed: {distributed}; Device: {device}; Rank: {rank}/{world_size}")
     
     # 随机种子
     seed = rank * pDataset.Train.num_workers + 50051
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     
-    # 数据加载器
+    # ========== 数据加载器 ==========
     DataloadTrainCls, DataloadValCls, _ = get_dataloader(pDataset.Train.data_src)
     
     train_dataset = DataloadTrainCls(pDataset.Train)
-    train_sampler = DistributedSampler(train_dataset)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=pGen.batch_size_per_gpu,
-        shuffle=False,
-        num_workers=pDataset.Train.num_workers,
-        sampler=train_sampler,
-        pin_memory=True
-    )
+    
+    if distributed:
+        train_sampler = DistributedSampler(train_dataset)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=pGen.batch_size_per_gpu,
+            shuffle=False,
+            num_workers=pDataset.Train.num_workers,
+            sampler=train_sampler,
+            pin_memory=True
+        )
+    else:
+        train_sampler = None
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=pGen.batch_size_per_gpu,
+            shuffle=True,
+            num_workers=pDataset.Train.num_workers,
+            pin_memory=True
+        )
     
     val_dataset = DataloadValCls(pDataset.Val)
     val_loader = DataLoader(
@@ -209,17 +243,21 @@ def main(args, config):
         pin_memory=True
     )
     
-    print(f"Rank: {rank}/{world_size}; Batch size: {pGen.batch_size_per_gpu}")
+    print(f"Batch size: {pGen.batch_size_per_gpu}; Train samples: {len(train_dataset)}; Val samples: {len(val_dataset)}")
     
-    # 模型
+    # ========== 模型 ==========
     model = DenoiseNet(pModel)
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    model = torch.nn.parallel.DistributedDataParallel(
-        model.to(device),
-        device_ids=[local_rank],
-        output_device=local_rank,
-        find_unused_parameters=True
-    )
+    
+    if distributed:
+        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = torch.nn.parallel.DistributedDataParallel(
+            model.to(device),
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True
+        )
+    else:
+        model = model.to(device)
     
     # 损失函数
     criterion = SelfSupervisedDenoiseLoss(loss_config)
@@ -229,55 +267,66 @@ def main(args, config):
     scheduler = builder.get_scheduler(optimizer, pOpt, len(train_loader))
     
     if rank == 0:
-        logger.info(f"Model: {model}")
-        logger.info(f"Optimizer: {optimizer}")
+        logger.info(f"Device: {device}")
+        logger.info(f"Distributed: {distributed}")
         logger.info(f"Loss config: {loss_config}")
     
-    # 训练循环
+    # ========== 训练循环 ==========
     best_val_loss = float('inf')
     
     for epoch in range(pOpt.schedule.begin_epoch, pOpt.schedule.end_epoch):
-        train_sampler.set_epoch(epoch)
+        if distributed:
+            train_sampler.set_epoch(epoch)
         
         # 训练
         train_loss = train_epoch(
             epoch, pOpt.schedule.end_epoch,
             model, train_loader, optimizer, scheduler,
-            criterion, logger, pGen.log_frequency, device, pGen.fp16
+            criterion, logger, pGen.log_frequency, device, 
+            fp16=pGen.fp16, distributed=distributed, rank=rank
         )
         
         # 验证
         if epoch % 5 == 0:
-            val_loss = validate(model, val_loader, criterion, device, logger)
+            val_loss = validate(model, val_loader, criterion, device, logger, rank)
             
             # 保存最佳模型
             if rank == 0 and val_loss['total_loss'] < best_val_loss:
                 best_val_loss = val_loss['total_loss']
+                # 获取实际模型（去掉 DDP 包装）
+                model_state = model.module.state_dict() if distributed else model.state_dict()
                 torch.save(
-                    model.module.state_dict(),
+                    model_state,
                     os.path.join(model_prefix, 'best_model.pth')
                 )
                 logger.info(f'Saved best model at epoch {epoch}')
         
         # 定期保存
         if rank == 0 and epoch % 10 == 0:
+            model_state = model.module.state_dict() if distributed else model.state_dict()
             torch.save(
-                model.module.state_dict(),
+                model_state,
                 os.path.join(model_prefix, f'model_epoch_{epoch}.pth')
             )
     
     # 保存最终模型
     if rank == 0:
+        model_state = model.module.state_dict() if distributed else model.state_dict()
         torch.save(
-            model.module.state_dict(),
+            model_state,
             os.path.join(model_prefix, 'final_model.pth')
         )
         logger.info('Training completed!')
+    
+    # 清理分布式
+    if distributed:
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Self-supervised LiDAR Denoising')
-    parser.add_argument('--config', help='config file path', type=str)
+    parser.add_argument('--config', help='config file path', type=str, required=True)
+    parser.add_argument('--distributed', help='enable distributed training', action='store_true')
     args = parser.parse_args()
     
     config = importlib.import_module(args.config.replace('.py', '').replace('/', '.'))
