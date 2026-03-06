@@ -44,7 +44,7 @@ def get_config():
         class Val:
             data_src = 'semanticstf_data'
             num_workers = 4
-            frame_point_num = None  # 验证时不采样，使用完整点云
+            frame_point_num = 60000  # 验证时也采样，避免内存溢出
             SeqDir = General.SeqDir
             Voxel = General.Voxel
 
@@ -78,12 +78,22 @@ def get_config():
         temperature = 0.1
         anomaly_threshold = 0.5
 
+        # 邻域重建损失参数（核心）
+        neighborhood_k = 16  # 近邻数量
+        min_neighbors = 5  # 最少有效邻居数
+        max_points = 6000  # 采样点数限制
+
+        # 表面平滑损失参数
+        smoothness_k = 8  # 平滑约束近邻数
+
         # 损失权重
         w_intensity = 1.0
         w_spatial = 0.5
         w_sparsity = 0.3
         w_contrastive = 0.2
         w_dist = 0.5
+        w_neighborhood = 1.0  # 邻域重建权重（重要）
+        w_smoothness = 0.3  # 表面平滑权重
 
     class OptimizeParam:
         class optimizer:

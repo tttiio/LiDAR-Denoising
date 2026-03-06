@@ -287,9 +287,237 @@ class IntensityDistributionLoss(nn.Module):
         return loss
 
 
+class NeighborhoodReconstructionLoss(nn.Module):
+    """
+    邻域重建损失
+    
+    核心思想：
+    - 异常点（雨雾噪声）应该移动到邻域正常点拟合的表面上
+    - 通过KNN找到邻域，用PCA拟合局部平面
+    - 去噪后的位置应该落在邻域平面上
+    
+    实现：
+    1. 找到每个点的K近邻
+    2. 用邻域中正常点（低异常概率）拟合局部平面
+    3. 计算去噪后的点到平面的距离
+    4. 高异常概率的点，距离应该小
+    """
+    def __init__(self, k=16, anomaly_threshold=0.5, max_points=6000, min_neighbors=5):
+        super(NeighborhoodReconstructionLoss, self).__init__()
+        self.k = k  # 近邻数量
+        self.anomaly_threshold = anomaly_threshold
+        self.max_points = max_points  # 最大计算点数，避免OOM
+        self.min_neighbors = min_neighbors  # 最少有效邻居数
+    
+    def forward(self, original_xyz, denoised_xyz, anomaly_prob, spatial_score):
+        """
+        Input:
+            original_xyz: (BS, 3, N, 1) 原始点云坐标
+            denoised_xyz: (BS, 3, N, 1) 去噪后的点云坐标
+            anomaly_prob: (BS, 1, N, 1) 异常概率
+            spatial_score: (BS, 1, N, 1) 空间一致性分数（用于加权邻域）
+        Output:
+            loss: 标量
+            info: dict 额外信息
+        """
+        BS, _, N, _ = original_xyz.shape
+        
+        # 转换维度
+        original_xyz = original_xyz.squeeze(-1).permute(0, 2, 1)  # (BS, N, 3)
+        denoised_xyz = denoised_xyz.squeeze(-1).permute(0, 2, 1)  # (BS, N, 3)
+        anomaly_prob = anomaly_prob.squeeze(-1)  # (BS, 1, N)
+        spatial_score = spatial_score.squeeze(-1)  # (BS, 1, N)
+        
+        total_loss = 0.0
+        total_valid = 0
+        total_plane_dist = 0.0
+        total_center_dist = 0.0
+        
+        for b in range(BS):
+            xyz_b = original_xyz[b]  # (N, 3)
+            denoised_b = denoised_xyz[b]  # (N, 3)
+            prob_b = anomaly_prob[b].squeeze(0)  # (N,)
+            score_b = spatial_score[b].squeeze(0)  # (N,)
+            
+            # 采样以减少内存
+            if N > self.max_points:
+                indices = torch.randperm(N, device=xyz_b.device)[:self.max_points]
+                xyz_sampled = xyz_b[indices]
+                denoised_sampled = denoised_b[indices]
+                prob_sampled = prob_b[indices]
+                score_sampled = score_b[indices]
+            else:
+                xyz_sampled = xyz_b
+                denoised_sampled = denoised_b
+                prob_sampled = prob_b
+                score_sampled = score_b
+            
+            M = xyz_sampled.shape[0]
+            
+            # 计算采样点之间的距离
+            dist_matrix = torch.cdist(xyz_sampled.unsqueeze(0), xyz_sampled.unsqueeze(0)).squeeze(0)  # (M, M)
+            
+            # 找K近邻（包含自己）
+            _, knn_idx = dist_matrix.topk(self.k + 1, largest=False, dim=1)  # (M, k+1)
+            knn_idx = knn_idx[:, 1:]  # 去掉自己 (M, k)
+            
+            # 获取邻居的信息
+            knn_xyz = xyz_sampled[knn_idx]  # (M, k, 3) 邻居的坐标
+            knn_score = score_sampled[knn_idx]  # (M, k) 邻居的空间一致性分数
+            knn_prob = prob_sampled[knn_idx]  # (M, k) 邻居的异常概率
+            
+            # 用空间一致性分数作为权重，正常点权重高
+            neighbor_weight = knn_score * (1 - knn_prob)  # (M, k)
+            neighbor_weight = neighbor_weight + 1e-6  # 避免除零
+            
+            # 计算加权邻域中心（正常点主导）
+            weight_sum = neighbor_weight.sum(dim=1, keepdim=True)  # (M, 1)
+            valid_mask = weight_sum.squeeze(-1) > self.min_neighbors  # 有效邻居数量足够
+            
+            if valid_mask.sum() < 10:
+                continue
+            
+            # 加权邻域中心
+            weighted_center = (knn_xyz * neighbor_weight.unsqueeze(-1)).sum(dim=1) / weight_sum.unsqueeze(-1)  # (M, 3)
+            
+            # 去中心化
+            centered = knn_xyz - weighted_center.unsqueeze(1)  # (M, k, 3)
+            
+            # 加权协方差矩阵（用于PCA拟合平面）
+            weighted_centered = centered * neighbor_weight.unsqueeze(-1)  # (M, k, 3)
+            cov = torch.bmm(weighted_centered.transpose(1, 2), centered)  # (M, 3, 3)
+            
+            # SVD分解找法向量（最小特征值对应的特征向量）
+            try:
+                U, S, V = torch.linalg.svd(cov)  # V的最后一列是法向量
+                normal = V[:, :, -1]  # (M, 3) 平面法向量
+            except:
+                # SVD失败时用简单方法
+                normal = torch.zeros_like(weighted_center)
+                normal[:, 2] = 1.0
+            
+            # 计算去噪后的点到邻域平面的距离
+            # 平面方程: (p - center) · normal = 0
+            denoised_centered = denoised_sampled - weighted_center  # (M, 3)
+            plane_dist = (denoised_centered * normal).sum(dim=1).abs()  # (M,) 到平面的距离
+            
+            # 计算去噪后的点到邻域中心的距离
+            center_dist = denoised_centered.norm(dim=1)  # (M,)
+            
+            # 异常点的去噪位置应该接近邻域平面
+            # 高异常概率的点，plane_dist应该小
+            anomaly_mask = prob_sampled > self.anomaly_threshold
+            normal_mask = ~anomaly_mask
+            
+            # 异常点：约束到邻域平面
+            if anomaly_mask.sum() > 0:
+                anomaly_plane_loss = (plane_dist[anomaly_mask] * prob_sampled[anomaly_mask]).mean()
+            else:
+                anomaly_plane_loss = torch.tensor(0.0, device=xyz_b.device)
+            
+            # 正常点：不应该移动太远（保持稳定性）
+            if normal_mask.sum() > 0:
+                normal_stability_loss = center_dist[normal_mask].mean() * 0.1
+            else:
+                normal_stability_loss = torch.tensor(0.0, device=xyz_b.device)
+            
+            batch_loss = anomaly_plane_loss + normal_stability_loss
+            total_loss = total_loss + batch_loss
+            total_valid += 1
+            
+            # 记录统计信息
+            total_plane_dist += plane_dist.mean().item()
+            total_center_dist += center_dist.mean().item()
+        
+        if total_valid > 0:
+            avg_loss = total_loss / total_valid
+            avg_plane_dist = total_plane_dist / total_valid
+            avg_center_dist = total_center_dist / total_valid
+        else:
+            avg_loss = torch.tensor(0.0, device=original_xyz.device)
+            avg_plane_dist = 0.0
+            avg_center_dist = 0.0
+        
+        info = {
+            'avg_plane_dist': avg_plane_dist,
+            'avg_center_dist': avg_center_dist,
+            'valid_batches': total_valid
+        }
+        
+        return avg_loss, info
+
+
+class SurfaceSmoothnessLoss(nn.Module):
+    """
+    表面平滑损失
+    
+    思想：
+    - 去噪后的点云表面应该是平滑的
+    - 相邻点的位移应该相似
+    """
+    def __init__(self, k=8, max_points=8000):
+        super(SurfaceSmoothnessLoss, self).__init__()
+        self.k = k
+        self.max_points = max_points
+    
+    def forward(self, displacement, xyz):
+        """
+        Input:
+            displacement: (BS, 3, N, 1) 位移向量
+            xyz: (BS, 3, N, 1) 原始坐标
+        Output:
+            loss: 标量
+        """
+        BS, _, N, _ = displacement.shape
+        
+        displacement = displacement.squeeze(-1).permute(0, 2, 1)  # (BS, N, 3)
+        xyz = xyz.squeeze(-1).permute(0, 2, 1)  # (BS, N, 3)
+        
+        total_loss = 0.0
+        
+        for b in range(BS):
+            disp_b = displacement[b]  # (N, 3)
+            xyz_b = xyz[b]  # (N, 3)
+            
+            # 采样
+            if N > self.max_points:
+                indices = torch.randperm(N, device=xyz.device)[:self.max_points]
+                disp_sampled = disp_b[indices]
+                xyz_sampled = xyz_b[indices]
+            else:
+                disp_sampled = disp_b
+                xyz_sampled = xyz_b
+            
+            M = xyz_sampled.shape[0]
+            
+            # 找近邻
+            dist = torch.cdist(xyz_sampled.unsqueeze(0), xyz_sampled.unsqueeze(0)).squeeze(0)
+            _, knn_idx = dist.topk(self.k + 1, largest=False, dim=1)
+            knn_idx = knn_idx[:, 1:]  # (M, k)
+            
+            # 相邻点的位移差异
+            knn_disp = disp_sampled[knn_idx]  # (M, k, 3)
+            disp_diff = (knn_disp - disp_sampled.unsqueeze(1)).norm(dim=2)  # (M, k)
+            
+            # 平滑损失：相邻点位移差异应该小
+            smoothness_loss = disp_diff.mean()
+            
+            total_loss = total_loss + smoothness_loss
+        
+        return total_loss / BS
+
+
 class SelfSupervisedDenoiseLoss(nn.Module):
     """
     综合自监督损失
+    
+    包含：
+    1. 强度预测损失：Masked Intensity Prediction
+    2. 空间一致性损失：局部几何平滑约束
+    3. 位移稀疏损失：正常点位移应接近0
+    4. 对比学习损失：正常点 vs 潜在异常点
+    5. 邻域重建损失：异常点应移动到邻域表面
+    6. 表面平滑损失：相邻点位移相似
     """
     def __init__(self, config):
         super(SelfSupervisedDenoiseLoss, self).__init__()
@@ -306,12 +534,28 @@ class SelfSupervisedDenoiseLoss(nn.Module):
         )
         self.dist_loss = IntensityDistributionLoss()
         
+        # 新增：邻域重建损失（核心）
+        self.neighborhood_loss = NeighborhoodReconstructionLoss(
+            k=config.get('neighborhood_k', 16),
+            anomaly_threshold=config.get('anomaly_threshold', 0.5),
+            max_points=config.get('max_points', 6000),
+            min_neighbors=config.get('min_neighbors', 5)
+        )
+        
+        # 新增：表面平滑损失
+        self.smoothness_loss = SurfaceSmoothnessLoss(
+            k=config.get('smoothness_k', 8),
+            max_points=config.get('max_points', 8000)
+        )
+        
         # 损失权重
         self.w_intensity = config.get('w_intensity', 1.0)
         self.w_spatial = config.get('w_spatial', 0.5)
         self.w_sparsity = config.get('w_sparsity', 0.3)
         self.w_contrastive = config.get('w_contrastive', 0.2)
         self.w_dist = config.get('w_dist', 0.5)
+        self.w_neighborhood = config.get('w_neighborhood', 1.0)  # 邻域重建权重
+        self.w_smoothness = config.get('w_smoothness', 0.3)  # 表面平滑权重
     
     def forward(self, pred_dict, pcds_xyz, pcds_intensity):
         """
@@ -359,6 +603,23 @@ class SelfSupervisedDenoiseLoss(nn.Module):
             pred_dict['spatial_score']
         )
         loss_dict['loss_dist'] = loss_dist * self.w_dist
+        
+        # 6. 邻域重建损失（核心：约束位移方向）
+        loss_neighborhood, neighborhood_info = self.neighborhood_loss(
+            pcds_xyz,
+            pred_dict['denoised_xyz'],
+            pred_dict['anomaly_prob'],
+            pred_dict['spatial_score']
+        )
+        loss_dict['loss_neighborhood'] = loss_neighborhood * self.w_neighborhood
+        loss_dict['neighborhood_info'] = neighborhood_info
+        
+        # 7. 表面平滑损失
+        loss_smoothness = self.smoothness_loss(
+            pred_dict['displacement'],
+            pcds_xyz
+        )
+        loss_dict['loss_smoothness'] = loss_smoothness * self.w_smoothness
         
         # 总损失
         total_loss = sum([v for k, v in loss_dict.items() if k.startswith('loss_')])
