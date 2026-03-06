@@ -26,7 +26,7 @@
 
 ## 🚀 安装
 
-### 方式一: 使用 pip
+### 方式一: 手动安装
 
 ```bash
 # 创建 conda 环境
@@ -34,10 +34,10 @@ conda create -n denoise python=3.10
 conda activate denoise
 
 # 安装 PyTorch (GPU 版本)
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+pip install torch==2.1.0 torchvision --index-url https://download.pytorch.org/whl/cu121
 
 # 安装其他依赖
-pip install -r requirements.txt
+pip install numpy scipy pyyaml matplotlib seaborn scikit-learn open3d tqdm
 
 # 编译 CUDA 扩展
 python setup.py build_ext --inplace
@@ -46,6 +46,10 @@ python setup.py build_ext --inplace
 ### 方式二: 一键安装
 
 ```bash
+pip install -r requirements.txt
+python setup.py build_ext --inplace
+
+# 或使用安装脚本
 chmod +x install.sh
 ./install.sh
 ```
@@ -94,6 +98,7 @@ LiDAR-Denoising/
 ├── train_denoise.py               # 训练脚本
 ├── evaluate_denoise.py            # 评估脚本
 ├── inference_denoise.py           # 推理脚本
+├── test_denoise.py                # 测试脚本
 ├── requirements.txt               # 依赖列表
 ├── setup.py                       # 安装脚本
 └── README.md                      # 本文档
@@ -101,7 +106,13 @@ LiDAR-Denoising/
 
 ## 🎯 使用方法
 
-### 训练
+### 1. 测试代码
+
+```bash
+python test_denoise.py
+```
+
+### 2. 训练
 
 ```bash
 # 单 GPU 训练
@@ -113,7 +124,7 @@ torchrun --nproc_per_node=4 train_denoise.py \
     --distributed
 ```
 
-### 评估
+### 3. 评估
 
 ```bash
 python evaluate_denoise.py \
@@ -122,13 +133,7 @@ python evaluate_denoise.py \
     --output eval_results
 ```
 
-评估输出包括：
-- ROC 曲线和 AUC
-- PR 曲线和 AUC
-- 混淆矩阵
-- 按天气类型分类的指标
-
-### 推理
+### 4. 推理
 
 ```bash
 python inference_denoise.py \
@@ -202,6 +207,15 @@ python inference_denoise.py \
 L_neighborhood = Σ anomaly_prob × distance_to_neighbor_plane
 ```
 
+### 3. 自监督学习原理
+
+| 任务 | 正常点行为 | 噪声点行为 | 用途 |
+|------|-----------|-----------|------|
+| **强度预测** | 预测准确 | 预测误差大 | 检测强度异常 |
+| **空间一致性** | 局部平滑 | 空间突变 | 检测位置异常 |
+| **邻域重建** | 位移≈0 | 移向邻域平面 | 学习修正向量 |
+| **对比学习** | 特征相似 | 特征独特 | 增强判别能力 |
+
 ## ⚙️ 配置说明
 
 主要配置在 `config/config_denoise_semanticstf.py`:
@@ -222,6 +236,13 @@ w_intensity = 1.0              # 强度预测
 w_spatial = 0.5                # 空间一致性
 w_neighborhood = 1.0           # 邻域重建 ⭐
 w_smoothness = 0.3             # 表面平滑
+w_sparsity = 0.3               # 位移稀疏
+w_contrastive = 0.2            # 对比学习
+
+# 自监督参数
+mask_ratio = 0.15              # 强度预测的 mask 比例
+knn_k = 8                      # KNN 邻居数
+anomaly_threshold = 0.5        # 异常检测阈值
 ```
 
 ## 📈 评估指标
@@ -262,6 +283,43 @@ data/SemanticSTF/
 - `.bin` 文件: `np.float32`, 形状 `(N, 5)`
 - 列: `[x, y, z, intensity, ring]`
 - 标签: `unlabeled=0`, `invalid=20` 为噪声点
+
+### 天气类型分布
+
+- rain (66 帧)
+- snow (460 帧)
+- light_fog (397 帧)
+- dense_fog (403 帧)
+
+## 📤 输出说明
+
+### 训练输出
+
+```
+experiments/denoise_semanticstf/
+├── checkpoint/
+│   ├── best_model.pth      # 最佳模型
+│   ├── final_model.pth     # 最终模型
+│   └── model_epoch_*.pth   # 中间检查点
+└── log.txt                  # 训练日志
+```
+
+### 评估输出
+
+```
+eval_results/
+├── roc_curve.png              # ROC 曲线
+├── pr_curve.png               # PR 曲线
+├── confusion_matrix.png       # 混淆矩阵
+├── probability_distribution.png  # 概率分布
+└── evaluation_report.txt      # 详细报告
+```
+
+### 推理输出
+
+- `{name}_denoised.pcd` - 去噪后的点云
+- `{name}_anomalies.pcd` - 检测到的异常点
+- `{name}_visualization.png` - 可视化结果
 
 ## 🔧 故障排除
 
