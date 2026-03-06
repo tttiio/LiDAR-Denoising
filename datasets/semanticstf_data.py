@@ -261,8 +261,10 @@ class SemanticSTFLoader(Dataset):
         # 转为 tensor
         xyz_tensor = torch.FloatTensor(xyz.astype(np.float32)).transpose(0, 1).unsqueeze(-1)  # (3, N, 1)
         intensity_tensor = torch.FloatTensor(intensity.astype(np.float32)).unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
-        coord_tensor = torch.FloatTensor(coord.astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
-        sphere_coord_tensor = torch.FloatTensor(sphere_coord.astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
+        # Quantize 返回 (N, 3)，但 VoxelMaxPool 只需要 (N, 2) 的 BEV 坐标
+        coord_tensor = torch.FloatTensor(coord[:, :2].astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
+        # PolarQuantize 返回 (N, 3)，但只需要前两维用于 Range View
+        sphere_coord_tensor = torch.FloatTensor(sphere_coord[:, :2].astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
         noise_mask_tensor = torch.BoolTensor(noise_mask).unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
         
         return {
