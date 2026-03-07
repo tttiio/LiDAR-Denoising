@@ -87,12 +87,19 @@ def train_epoch(epoch, end_epoch, model, train_loader, optimizer, scheduler,
         if fp16:
             scaler.scale(loss).backward()
             scaler.step(optimizer)
+            
+            # AMP 防治机制：检查 scale 是否缩小。如果缩小，说明遇到 NaN/Inf，optimizer.step() 被跳过了
+            scale = scaler.get_scale()
             scaler.update()
+            skip_lr_sched = (scale > scaler.get_scale())
+            
+            # 只有在没有跳过参数更新时，才更新学习率
+            if not skip_lr_sched:
+                scheduler.step()
         else:
             loss.backward()
             optimizer.step()
-        
-        scheduler.step()
+            scheduler.step()
         
         # 日志
         if (i % log_frequency == 0) and rank == 0:
@@ -126,10 +133,14 @@ def validate(model, val_loader, criterion, device, logger, rank=0):
             loss_dict = criterion(pred_dict, xyz, intensity)
             
             for k, v in loss_dict.items():
-                if k not in total_losses:
-                    total_losses[k] = 0
-                if isinstance(v, torch.Tensor):
-                    total_losses[k] += v.item()
+                # 只对以 'loss_' 开头或者名为 'total_loss' 的标量进行累计
+                if k.startswith('loss_') or k == 'total_loss':
+                    if k not in total_losses:
+                        total_losses[k] = 0.0
+                    if isinstance(v, torch.Tensor):
+                        total_losses[k] += v.item()
+                    else:
+                        total_losses[k] += float(v)
             
             num_batches += 1
     
