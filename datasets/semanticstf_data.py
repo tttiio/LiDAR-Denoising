@@ -277,7 +277,8 @@ class SemanticSTFLoader(Dataset):
             'coord': coord_tensor,                 # (N, 2, 1) BEV 坐标
             'sphere_coord': sphere_coord_tensor,   # (N, 2, 1) 极坐标
             'noise_mask': noise_mask_tensor,       # (1, N, 1) 噪声点标记
-            'labels': torch.LongTensor(labels) if labels is not None else None,  # 语义标签
+            # 先将uint32转为int64，再转LongTensor
+            'labels': torch.LongTensor(labels.astype(np.int64)) if labels is not None else None,  # 语义标签
             'weather': weather_type,               # 天气类型
             'name': sample['name']                 # 文件名
         }

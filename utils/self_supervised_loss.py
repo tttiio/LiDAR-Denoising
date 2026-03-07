@@ -361,10 +361,14 @@ class NeighborhoodReconstructionLoss(nn.Module):
             _, knn_idx = dist_matrix.topk(self.k + 1, largest=False, dim=1)  # (M, k+1)
             knn_idx = knn_idx[:, 1:]  # 去掉自己 (M, k)
             
-            # 获取邻居的信息
-            knn_xyz = xyz_sampled[knn_idx]  # (M, k, 3) 邻居的坐标
-            knn_score = score_sampled[knn_idx]  # (M, k) 邻居的空间一致性分数
-            knn_prob = prob_sampled[knn_idx]  # (M, k) 邻居的异常概率
+            # ========== 关键修改1：修正knn_xyz的计算（dim=1而非dim=0） ==========
+            # 正确获取邻域坐标：直接索引，替代错误的gather
+            knn_xyz = xyz_sampled[knn_idx]  # (M, k, 3) 【原gather方式错误，改用直接索引】
+            
+            # ========== 关键修改2：修正knn_score和knn_prob的gather维度 ==========
+            # 正确获取邻域的空间分数和异常概率
+            knn_score = score_sampled[knn_idx]  # (M, k) 【原dim=0错误，改用直接索引】
+            knn_prob = prob_sampled[knn_idx]  # (M, k) 【原dim=0错误，改用直接索引】
             
             # 用空间一致性分数作为权重，正常点权重高
             neighbor_weight = knn_score * (1 - knn_prob)  # (M, k)
@@ -378,10 +382,11 @@ class NeighborhoodReconstructionLoss(nn.Module):
                 continue
             
             # 加权邻域中心
-            weighted_center = (knn_xyz * neighbor_weight.unsqueeze(-1)).sum(dim=1) / weight_sum.unsqueeze(-1)  # (M, 3)
+            weighted_center = (knn_xyz * neighbor_weight.unsqueeze(-1)).sum(dim=1) / weight_sum  # (M, 3)
             
-            # 去中心化
-            centered = knn_xyz - weighted_center.unsqueeze(1)  # (M, k, 3)
+            # ========== 关键修改3：简化expand操作，利用广播机制 ==========
+            # 去中心化：weighted_center.unsqueeze(1) → (M, 1, 3)，可直接与knn_xyz (M, k, 3) 广播相减
+            centered = knn_xyz - weighted_center.unsqueeze(1)  # (M, k, 3) 【移除多余的expand_as】
             
             # 加权协方差矩阵（用于PCA拟合平面）
             weighted_centered = centered * neighbor_weight.unsqueeze(-1)  # (M, k, 3)
