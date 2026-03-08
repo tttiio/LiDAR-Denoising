@@ -271,16 +271,23 @@ class SemanticSTFLoader(Dataset):
         sphere_coord_tensor = torch.FloatTensor(sphere_coord[:, :2].astype(np.float32)).unsqueeze(-1)  # (N, 2, 1)
         noise_mask_tensor = torch.BoolTensor(noise_mask).unsqueeze(0).unsqueeze(-1)  # (1, N, 1)
         
+        # 处理 labels 为 None 的情况，生成一个全 -1 的占位符 Tensor
+        if labels is not None:
+            labels_tensor = torch.LongTensor(labels.astype(np.int64))
+        else:
+            # 打印警告，让你知道哪个文件缺了标签
+            print(f"\n[Warning] 样本 {sample['name']} 缺失 label 文件，将使用 -1 填充！")
+            labels_tensor = torch.full((len(xyz),), -1, dtype=torch.long)
+
         return {
-            'xyz': xyz_tensor,                    # (3, N, 1) 笛卡尔坐标
-            'intensity': intensity_tensor,         # (1, N, 1) 反射强度
-            'coord': coord_tensor,                 # (N, 2, 1) BEV 坐标
-            'sphere_coord': sphere_coord_tensor,   # (N, 2, 1) 极坐标
-            'noise_mask': noise_mask_tensor,       # (1, N, 1) 噪声点标记
-            # 先将uint32转为int64，再转LongTensor
-            'labels': torch.LongTensor(labels.astype(np.int64)) if labels is not None else None,  # 语义标签
-            'weather': weather_type,               # 天气类型
-            'name': sample['name']                 # 文件名
+            'xyz': xyz_tensor,                    
+            'intensity': intensity_tensor,        
+            'coord': coord_tensor,                
+            'sphere_coord': sphere_coord_tensor,  
+            'noise_mask': noise_mask_tensor,      
+            'labels': labels_tensor,              # <--- 这里改成了安全的 Tensor
+            'weather': weather_type,              
+            'name': sample['name']                
         }
     
     def __len__(self):

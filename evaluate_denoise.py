@@ -1,7 +1,7 @@
 """
 点云去噪评估脚本
 
-在 SemanticSTF 测试集上评估去噪效果
+在 SemanticSTF 验证集(Val)上评估去噪效果
 使用标签中的噪声点（unlabeled=0, invalid=20）作为真值
 """
 
@@ -16,7 +16,7 @@ import seaborn as sns
 import importlib
 
 from models_denoise import DenoiseNet
-from datasets.semanticstf_data import DataloadTest
+from datasets.semanticstf_data import DataloadVal 
 from utils.self_supervised_loss import SelfSupervisedDenoiseLoss
 
 
@@ -66,7 +66,7 @@ def evaluate_anomaly_detection(model, test_loader, device, threshold=0.5):
     
     all_probs = np.array(all_probs)
     all_labels = np.array(all_labels)
-    all_weather = np.array(all_weather)
+    all_weather = np.array(all_weather).flatten()
     
     # 计算指标
     pred_binary = (all_probs > threshold).astype(int)
@@ -293,11 +293,12 @@ def main():
     model, pModel, pDataset = load_model(args.config, args.checkpoint, device)
     print('Model loaded!')
     
-    # 加载测试数据
-    print('Loading test data...')
-    test_dataset = DataloadTest(pDataset.Test)
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
+    # [修改点 2] 加载验证数据
+    print('Loading validation data...')
+    # 注意：这里使用的是 pDataset.Val，如果你的配置文件里叫别的名字(比如 pDataset.val)，请在这里修改
+    val_dataset = DataloadVal(pDataset.Val)
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
         batch_size=1,
         shuffle=False,
         num_workers=4
@@ -305,7 +306,8 @@ def main():
     
     # 评估
     print('Evaluating...')
-    metrics, all_results = evaluate_anomaly_detection(model, test_loader, device, args.threshold)
+    # [修改点 3] 将传入的 loader 从 test_loader 改成了 val_loader
+    metrics, all_results = evaluate_anomaly_detection(model, val_loader, device, args.threshold)
     
     # 按天气评估
     weather_metrics = evaluate_by_weather(all_results)
